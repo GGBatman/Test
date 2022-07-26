@@ -1,0 +1,222 @@
+#!/usr/bin/env python
+
+"""Scans all file shares in the project table for new files and adds to transmissionlog table."""
+__author__ = "Danya Ferrell"
+__copyright__ = "Copyright 2022, TSA Exit SWATTransmissions Product"
+__credits__ = ["",""]
+__license__ = "GPL"
+__version__ = "1.0.0"
+__maintainer__ = "Danya Ferrell"
+__email__ = "dferrell@metlife.com"
+__status__ = "PROD"
+
+import os
+import mysql.connector
+from datetime import datetime,timedelta,date
+import re
+import smtplib
+from email.mime.text import MIMEText
+from multiprocessing.pool import ThreadPool
+import multiprocessing as mp
+import threading 
+import copy
+
+#########################  Variable Declaration ###########################
+errTable = []
+
+def sendemail (sender, receivers, msg):
+    try:
+       smtpObj = smtplib.SMTP('commin.metlife.com',25)
+       smtpObj.sendmail(sender, receivers, msg)        
+       print ("Successfully sent email")
+    except Exception as e:
+       print ("Error occured: unable to send email " + str(e))
+
+def getFileCount(path: str) -> int:
+    file_entries = sum([len(files) for r, d, files in os.walk(path)]) 
+    return file_entries
+
+def finisheduploading(fileshare: str, priorityID) -> int:
+    res = 0
+    try:
+        with open(fileshare) as f:
+            res = 1
+        if (priorityID == 1 or priorityID == 2):
+            res = 1
+        else: res = 0
+    except Exception as e:
+            res = 0
+    return res
+
+def findFile(myDict,file,path,size) -> [2]:    
+    fileinDB = [0,0]    
+
+    try:
+      result = list(myDict["filename"]).count(file)
+      while result > 0:         
+          idx = list(myDict["filename"]).index(file)
+          src = list(myDict["sourcepath"])[idx]
+          sz = list(myDict["filesizeinbytes"])[idx]
+          fileinDB[0] = (idx > -1 and src == path)
+          result = result - 1
+          if (fileinDB[0] == True):
+              #print(file)
+              #print(path)
+              #print("filefound")
+              fileinDB = [1,idx]
+              break
+          else:
+              myDict["filename"].pop(idx)
+              myDict["sourcepath"].pop(idx)
+              myDict["filesizeinbytes"].pop(idx)
+              #print(idx)
+              #print(src)
+              #print(size)     
+      
+    except ValueError as ve:
+        print("item not found in list")
+        fileinDB = [0,0]
+    except Exception as e:
+        print("other error occured")
+        print(e)
+        fileinDB = [0,0]
+    
+    return fileinDB
+
+
+def monitorForProject(projectID,fileShare,priorityID,driveName,farmerserverid):
+        try:
+            start_time = str(datetime.now().strftime('%Y-%m-%d:%H:%M:%S'))            
+            cnx = mysql.connector.connect(user='transmissionlog', password='tr4nsm1ss10n',
+                                      host='127.0.0.1',
+                                      database='swattransmissions')  
+            query = ("select filename, sourcepath, filesizeinbytes, datereceived,canbedeleted,status " +
+                            "from swattransmissions.transmissionlog tl " + 
+                            "inner join swattransmissions.project p on p.id = tl.projectid " + 
+                            "where tl.projectid = " + str(projectID) + " order by tl.sourcepath, tl.filename")
+            #print(query)
+            #print(fileShare)
+            results = cnx.cursor(buffered=True)
+            results.execute(query)           
+            newrow = cnx.cursor(buffered=True)
+
+            dbDict = {"filename":[],"sourcepath":[],"filesizeinbytes":[],"datereceived":[]};
+            pathDict =  {"filename":[],"sourcepath":[],"filesizeinbytes":[],"datereceived":[], "foundinDB":[]};
+    
+            for filename,sourcepath,filesizeinbytes,datereceived,canbedeleted,status in results:
+                dbDict["filename"].append(filename)
+                dbDict["sourcepath"].append(sourcepath)
+                dbDict["filesizeinbytes"].append(filesizeinbytes)
+                dbDict["datereceived"].append(datereceived)
+          
+            for subdir, dirs, files in os.walk(fileShare):
+                dirs.sort()
+                for name in sorted(files):
+                    fullpath = subdir + '\\' + name
+                    if (os.path.exists(fullpath)):
+                        datecreated = datetime.fromtimestamp(os.path.getctime(fullpath)).strftime('%Y-%m-%d:%H:%M:%S')
+                        size = os.path.getsize(fullpath)                                   
+                        sourcepath = subdir
+                        pathDict["filename"].append(name)
+                        pathDict["sourcepath"].append(sourcepath)
+                        pathDict["filesizeinbytes"].append(size)
+                        pathDict["datereceived"].append(datecreated)  
+                        pathDict["foundinDB"].append(False)
+                        try:
+                            result = findFile(dbDict,name,sourcepath,size)
+                            pathDict["foundinDB"][len(pathDict["filename"])-1] = bool(result[0])
+                        except ValueError as ve:
+                             fileinDB = 0
+                             pathDict["foundinDB"].append(False)
+                        except Exception as e:
+                             print(e)
+                             fileinDB = 0   
+                             pathDict["foundinDB"].append(False)
+
+            listCnt = len(pathDict["filename"]) - 1
+            while listCnt > -1:
+                if (list(pathDict["foundinDB"])[listCnt] == False):
+                    filename = list(pathDict["filename"])[listCnt]
+                    size = list(pathDict["filesizeinbytes"])[listCnt]
+                    sourcepath = list(pathDict["sourcepath"])[listCnt]
+                    canbetransmitted = finisheduploading(sourcepath + '\\' + filename, priorityID)
+                    datecreated = list(pathDict["datereceived"])[listCnt]
+
+                    query = ("insert into swattransmissions.transmissionlog (filename, filesizeinbytes, " + 
+                                  "sourcepath,canbetransmitted,isdeleted,datereceived,farmerserverid,canbedeleted, " +
+                                  "projectid,lastcheck) values ('" + str(filename.replace("'","''")) + "'," + str(size) + ",'" + str(sourcepath.replace("'","''").replace("\\","\\\\")) + 
+                                  "'," + str(canbetransmitted) + ",0,'" + str(datecreated) + "'," + str(farmerserverid) + ",0," + str(projectID) + ",'" + str(start_time) + "')")
+                    print(query)
+                    newrow.execute(query)  
+                    cnx.commit() 
+
+                listCnt = listCnt - 1
+        except TypeError as te:
+            print(te)
+        except NameError as ne:
+            print(ne)
+        except AttributeError as ae:
+            print(ae)           
+        except ProgrammingError as pe:
+            print(pe)
+        except Exception as e:
+            print("secondary exception")
+            print(e)
+            errTable.append("Multiprocessing error for " + str(projectID) + ". " + e)
+ 
+if __name__ == '__main__':
+    cnx = mysql.connector.connect(user='transmissionlog', password='tr4nsm1ss10n',
+                                      host='127.0.0.1',
+                                      database='swattransmissions')  
+    start_time = str(datetime.now().strftime('%Y-%m-%d:%H:%M:%S'))
+    print("File Intake Started at " + start_time)
+    query = ("Select distinct p.ID, p.FileShare, p.PriorityID, dp.drivename, p.farmerserverid " +
+                "from swattransmissions.Drive dp  " +
+                "inner join swattransmissions.ProjectShareLookup psl on psl.DriveID = dp.ID  " +
+                "inner join swattransmissions.Project p on p.ID = psl.ProjectID " +
+                "left outer join swattransmissions.Transmissionlog tl on tl.projectid = p.id " +
+                "where dp.TransmitData = 1 and p.projectcomplete = 0 " +                 
+                "order by p.fileshare")
+    #print(query)
+    projects = cnx.cursor(buffered=True)
+    projects.execute(query)
+
+    record = projects.fetchall()
+    record_tuple = []
+    record_list = []
+    if record:   
+        for row in record:
+        ## Fetch rows from table and start upload the files...
+        ## get all required details from Database Table
+            projectID = row[0]
+            fileShare = row[1]
+            priorityID = row[2]
+            driveName = row[3]
+            farmerserverid = row[4]
+            record_tuple = (projectID,fileShare,priorityID,driveName,farmerserverid)
+            record_list.append(record_tuple) ##= tuple(record_list)   
+            #monitorForProject(projectID,fileShare,priorityID,driveName,farmerserverid)
+
+    try:
+            pool = mp.Pool(mp.cpu_count())                          
+            updated = pool.starmap_async(monitorForProject, record_list)
+            #for rec in record_list:
+            #    monitorForProject(rec[0],rec[1],rec[2],rec[3],rec[4])
+            pool.close()
+            pool.join()  
+            cnx.close()
+            end_time = str(datetime.now().strftime('%Y-%m-%d:%H:%M:%S'))
+            print("File Intake ended at " + end_time)
+    except Exception as e:
+            #print("main exception")
+            start_time = str(datetime.now().strftime('%m-%d-%Y %H:%M:%S'))
+            sender = 'TSATransmissions@metlife.com'
+            receivers = ['TSATransmissions@metlife.com']
+            msg = MIMEText('Failed to run TSAE_FFile_Check script code during multiprocessing. Error was ' + str(e))
+    
+            msg['Subject'] = 'P&C File Intake Monitoring Error -  ' + str(start_time) + '.'
+            msg['From'] = 'NoReply@TSATransmissions'
+            msg['To'] = 'TSATransmissions@metlife.com'    
+    
+            sendemail(sender, receivers, msg.as_string())
+    
