@@ -1,222 +1,325 @@
-#!/usr/bin/env python
+################# imports #####################################################
 
-"""Scans all file shares in the project table for new files and adds to transmissionlog table."""
-__author__ = "Danya Ferrell"
-__copyright__ = "Copyright 2022, TSA Exit SWATTransmissions Product"
-__credits__ = ["",""]
-__license__ = "GPL"
-__version__ = "1.0.0"
-__maintainer__ = "Danya Ferrell"
-__email__ = "dferrell@metlife.com"
-__status__ = "PROD"
-
-import os
-import mysql.connector
-from datetime import datetime,timedelta,date
-import re
+import time
+from datetime import datetime
 import smtplib
+import os
+import sys
+import pathlib
 from email.mime.text import MIMEText
-from multiprocessing.pool import ThreadPool
-import multiprocessing as mp
-import threading 
-import copy
+from email.mime.multipart import MIMEMultipart
+import mysql.connector as MySql
+from watchdog.observers import Observer
+from watchdog.events import PatternMatchingEventHandler
+import logging
+# import win32serviceutil
+# import win32service
+# import win32event
+# import servicemanager
+# import socket
+################### Logging ###################################################
+class Logger():
+    def __init__(self):
+        pass
+    def generate_logger(self):
+        # create logger
+        self.logger = logging.getLogger('WatchDog')
+        # self.loger = logging.getLogger("botocore")
+        # self.logger = logging.getLogger("boto3")
+        # self.logger = logging.getLogger("boto")
+        # self.logger = logging.getLogger("s3transfer")
+        self.logger.setLevel(logging.DEBUG)
+        self.logger.propagate = False
+        # create console handler and set level to debug
+        con_hdlr = logging.StreamHandler()
+        file_hdlr = logging.FileHandler('WatchDog_Errors.log')
+        con_hdlr.setLevel(logging.DEBUG)
+        file_hdlr.setLevel(logging.DEBUG)
+        # create formatter
+        formatter = logging.Formatter('%(levelname)s - %(message)s')
+        # add formatter to ch
+        con_hdlr.setFormatter(formatter)
+        file_hdlr.setFormatter(formatter)
+        if (self.logger.hasHandlers()):
+            self.logger.handlers.clear()
+        # add ch to logger
+        self.logger.addHandler(con_hdlr)
+        self.logger.addHandler(file_hdlr)
+        return self.logger
 
-#########################  Variable Declaration ###########################
-errTable = []
+# Remove all handlers associated with the root logger object.
+# for handler in logging.root.handlers[:]:
+#     logging.root.removeHandler(handler)
+# log =  Logger()
+# db_log = log.generate_logger()
+# print = db_log.info
+####################### DB Connection #########################################
+# try:
 
-def sendemail (sender, receivers, msg):
-    try:
-       smtpObj = smtplib.SMTP('commin.metlife.com',25)
-       smtpObj.sendmail(sender, receivers, msg)        
-       print ("Successfully sent email")
-    except Exception as e:
-       print ("Error occured: unable to send email " + str(e))
-
-def getFileCount(path: str) -> int:
-    file_entries = sum([len(files) for r, d, files in os.walk(path)]) 
-    return file_entries
-
-def finisheduploading(fileshare: str, priorityID) -> int:
-    res = 0
-    try:
-        with open(fileshare) as f:
-            res = 1
-        if (priorityID == 1 or priorityID == 2):
-            res = 1
-        else: res = 0
-    except Exception as e:
-            res = 0
-    return res
-
-def findFile(myDict,file,path,size) -> [2]:    
-    fileinDB = [0,0]    
-
-    try:
-      result = list(myDict["filename"]).count(file)
-      while result > 0:         
-          idx = list(myDict["filename"]).index(file)
-          src = list(myDict["sourcepath"])[idx]
-          sz = list(myDict["filesizeinbytes"])[idx]
-          fileinDB[0] = (idx > -1 and src == path)
-          result = result - 1
-          if (fileinDB[0] == True):
-              #print(file)
-              #print(path)
-              #print("filefound")
-              fileinDB = [1,idx]
-              break
-          else:
-              myDict["filename"].pop(idx)
-              myDict["sourcepath"].pop(idx)
-              myDict["filesizeinbytes"].pop(idx)
-              #print(idx)
-              #print(src)
-              #print(size)     
-      
-    except ValueError as ve:
-        print("item not found in list")
-        fileinDB = [0,0]
-    except Exception as e:
-        print("other error occured")
-        print(e)
-        fileinDB = [0,0]
+#     db = MySql.connect(user='transmissionlog', password='tr4nsm1ss10n',
+#                                           host='127.0.0.1',
+#                                           database='marsextract')  
+#     ##cur = db.cursor()
+# except Exception as e:
+#     print('Error Connecting DB., ' + str(e))
     
-    return fileinDB
+####################### DB Connection #########################################
+if __name__ == "__main__":
+    try:
+        patterns = ["*"]
+        ignore_patterns = None
+        ignore_directories = True
+        case_sensitive = True
+        my_event_handler = PatternMatchingEventHandler(patterns, ignore_patterns, ignore_directories, case_sensitive)
+    except Exception as e:
+        print("Error occurred " + str(e))
+# def on_created(event):
+# def on_deleted(event):
+#    print(f"Someone deleted {event.src_path}!")
+################## on Modified event ##########################################
+event_list = []
 
+def on_modified(event):
+    try:
+        global last_trigger_time
+        current_time = time.time()
+        if event.src_path.find('~') == -1 and (current_time - last_trigger_time) > 0:
+                event_list.append(event.event_type)
+                last_trigger_time = current_time
+                # if len(event_list) == 2:
+                file_name = os.path.basename(pathlib.Path(event.src_path))
+                sourcepath = str(pathlib.Path(event.src_path))
+                size = os.path.getsize(sourcepath)
+                dir_name = os.path.dirname(os.path.abspath(sourcepath))
+                dir_list = dir_name.split('\\')
+                drive_name = dir_list[0][0]
+                ticketnum = dir_list[2].upper()
+                fileshare = "\\\\USTRY1METV08B9\\" + ticketnum
+                print(sourcepath)
+                if drive_name == 'J':
+                    sourcepath = dir_name.replace('J:\SWATTransmissions\\',"\\\\USTRY1METV08B9\\")
+                else:
+                    sourcepath = dir_name.replace('G:\SWATTransmissions\\',"\\\\USTRY1METV08B9\\")
+                if len(dir_list) >= 3 :
+                  if drive_name == 'J':
+                      print(sourcepath)
+                      farmerserverid = 1
+                      sql = """ select id, ticketnum from swattransmissions.project
+                              where UPPER(fileshare) = %s"""
+                      file_found = """select count(*) from swattransmissions.transmissionlog
+                                      where filename = %s and filesizeinbytes = %s and sourcepath = %s"""
+                      try:
+            
+                        db = MySql.connect(user='transmissionlog', password='tr4nsm1ss10n',
+                                                      host='127.0.0.1',
+                                                      database='swattransmissions')  
+                      except Exception as e:
+                          print("Error Connecting  DB" + str(e))
+                      con = db.cursor()
+                      con.execute(sql, (fileshare, ))
+                      result = con.fetchall()
+                      for i in result:
+                          projectid = i[0]
+                          ticketnum = i[1]
+                      con.execute(file_found, (file_name, size, sourcepath))
+                      file_exists = con.fetchone()[0]
+                  else:
+                      farmerserverid = 2
+                      sql = """ select id,ticketnum from marsextract.project
+                                  where UPPER(fileshare) = %s"""
+                      file_found = """select count(*) from marsextract.transmissionlog
+                                      where filename = %s and filesizeinbytes = %s and sourcepath = %s"""
+                      try:
+                
+                            db = MySql.connect(user='transmissionlog', password='tr4nsm1ss10n',
+                                                          host='127.0.0.1',
+                                                          database='marsextract')  
+                      except Exception as e:
+                              print('Error Connecting DB., ' + str(e))
+                      con = db.cursor()
+                      con.execute(sql, (fileshare, ))
+                      result = con.fetchall()
+                      for i in result:
+                          projectid = i[0]
+                          ticketnum = i[1]
+                      con.execute(file_found, (file_name, size, sourcepath))
+                      file_exists = con.fetchone()[0]
+                ##os.path.dirname(dir1).split()[0][0]
+                canbetransmitted = 1
+                isdeleted = 0
+                ##datereceived = datetime.fromtimestamp(os.path.getctime(sourcepath)).strftime('%Y-%m-%d %H:%M:%S')
+                canbedeleted = 0
+                last_check = str(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                if file_exists == 0:
+                    insert_transmissionLog(file_name,size,sourcepath,canbetransmitted,isdeleted,last_check,farmerserverid,canbedeleted,projectid,last_check)
+                    ##print(len(event_list))
+                    print(os.path.join(sourcepath,file_name) + ' Loaded to database')
+                    con.close()
+    except Exception as e:
+        print("Error occurred " + str(e))
+        ##db_log.info("Error occurred " + str(e))
+        pass
+        ##event_list.clear()
+###############################################################################
+# def on_deleted(event):
+#     file_name = os.path.basename(pathlib.Path(event.src_path))
+################################### Insert Transmission log ###################
 
-def monitorForProject(projectID,fileShare,priorityID,driveName,farmerserverid):
+def insert_transmissionLog(*args):
+    file_name = args[0]
+    size = args[1]
+    sourcepath = args[2]
+    canbetransmitted = args[3]
+    isdeleted = args[4]
+    datereceived = args[5]
+    farmerserverid = int(args[6])
+    canbedeleted = args[7]
+    projectid = int(args[8])
+    last_check = args[9]
+    file_det = (file_name, size,sourcepath,canbetransmitted,isdeleted,datereceived,farmerserverid,canbedeleted,projectid,last_check)
+    if farmerserverid == 1:
         try:
-            start_time = str(datetime.now().strftime('%Y-%m-%d:%H:%M:%S'))            
-            cnx = mysql.connector.connect(user='transmissionlog', password='tr4nsm1ss10n',
-                                      host='127.0.0.1',
-                                      database='swattransmissions')  
-            query = ("select filename, sourcepath, filesizeinbytes, datereceived,canbedeleted,status " +
-                            "from swattransmissions.transmissionlog tl " + 
-                            "inner join swattransmissions.project p on p.id = tl.projectid " + 
-                            "where tl.projectid = " + str(projectID) + " order by tl.sourcepath, tl.filename")
-            #print(query)
-            #print(fileShare)
-            results = cnx.cursor(buffered=True)
-            results.execute(query)           
-            newrow = cnx.cursor(buffered=True)
-
-            dbDict = {"filename":[],"sourcepath":[],"filesizeinbytes":[],"datereceived":[]};
-            pathDict =  {"filename":[],"sourcepath":[],"filesizeinbytes":[],"datereceived":[], "foundinDB":[]};
     
-            for filename,sourcepath,filesizeinbytes,datereceived,canbedeleted,status in results:
-                dbDict["filename"].append(filename)
-                dbDict["sourcepath"].append(sourcepath)
-                dbDict["filesizeinbytes"].append(filesizeinbytes)
-                dbDict["datereceived"].append(datereceived)
-          
-            for subdir, dirs, files in os.walk(fileShare):
-                dirs.sort()
-                for name in sorted(files):
-                    fullpath = subdir + '\\' + name
-                    if (os.path.exists(fullpath)):
-                        datecreated = datetime.fromtimestamp(os.path.getctime(fullpath)).strftime('%Y-%m-%d:%H:%M:%S')
-                        size = os.path.getsize(fullpath)                                   
-                        sourcepath = subdir
-                        pathDict["filename"].append(name)
-                        pathDict["sourcepath"].append(sourcepath)
-                        pathDict["filesizeinbytes"].append(size)
-                        pathDict["datereceived"].append(datecreated)  
-                        pathDict["foundinDB"].append(False)
-                        try:
-                            result = findFile(dbDict,name,sourcepath,size)
-                            pathDict["foundinDB"][len(pathDict["filename"])-1] = bool(result[0])
-                        except ValueError as ve:
-                             fileinDB = 0
-                             pathDict["foundinDB"].append(False)
-                        except Exception as e:
-                             print(e)
-                             fileinDB = 0   
-                             pathDict["foundinDB"].append(False)
-
-            listCnt = len(pathDict["filename"]) - 1
-            while listCnt > -1:
-                if (list(pathDict["foundinDB"])[listCnt] == False):
-                    filename = list(pathDict["filename"])[listCnt]
-                    size = list(pathDict["filesizeinbytes"])[listCnt]
-                    sourcepath = list(pathDict["sourcepath"])[listCnt]
-                    canbetransmitted = finisheduploading(sourcepath + '\\' + filename, priorityID)
-                    datecreated = list(pathDict["datereceived"])[listCnt]
-
-                    query = ("insert into swattransmissions.transmissionlog (filename, filesizeinbytes, " + 
-                                  "sourcepath,canbetransmitted,isdeleted,datereceived,farmerserverid,canbedeleted, " +
-                                  "projectid,lastcheck) values ('" + str(filename.replace("'","''")) + "'," + str(size) + ",'" + str(sourcepath.replace("'","''").replace("\\","\\\\")) + 
-                                  "'," + str(canbetransmitted) + ",0,'" + str(datecreated) + "'," + str(farmerserverid) + ",0," + str(projectID) + ",'" + str(start_time) + "')")
-                    print(query)
-                    newrow.execute(query)  
-                    cnx.commit() 
-
-                listCnt = listCnt - 1
-        except TypeError as te:
-            print(te)
-        except NameError as ne:
-            print(ne)
-        except AttributeError as ae:
-            print(ae)           
-        except ProgrammingError as pe:
-            print(pe)
+                db = MySql.connect(user='transmissionlog', password='tr4nsm1ss10n',
+                                              host='127.0.0.1',
+                                              database='swattransmissions')  
         except Exception as e:
-            print("secondary exception")
-            print(e)
-            errTable.append("Multiprocessing error for " + str(projectID) + ". " + e)
- 
-if __name__ == '__main__':
-    cnx = mysql.connector.connect(user='transmissionlog', password='tr4nsm1ss10n',
-                                      host='127.0.0.1',
-                                      database='swattransmissions')  
-    start_time = str(datetime.now().strftime('%Y-%m-%d:%H:%M:%S'))
-    print("File Intake Started at " + start_time)
-    query = ("Select distinct p.ID, p.FileShare, p.PriorityID, dp.drivename, p.farmerserverid " +
-                "from swattransmissions.Drive dp  " +
-                "inner join swattransmissions.ProjectShareLookup psl on psl.DriveID = dp.ID  " +
-                "inner join swattransmissions.Project p on p.ID = psl.ProjectID " +
-                "left outer join swattransmissions.Transmissionlog tl on tl.projectid = p.id " +
-                "where dp.TransmitData = 1 and p.projectcomplete = 0 " +                 
-                "order by p.fileshare")
-    #print(query)
-    projects = cnx.cursor(buffered=True)
-    projects.execute(query)
+                  logging.INFO('Error Connecting DB., ' + str(e))
+        
+        ins_sql = """insert into swattransmissions.transmissionlog (filename,
+										filesizeinbytes, 
+                                        sourcepath,
+                                        canbetransmitted,
+                                        isdeleted,
+                                        datereceived,
+                                        farmerserverid,
+                                        canbedeleted,
+                                        projectid,
+ 									    lastcheck) 
+                                values (%s, 
+                                        %s, 
+                                        %s, 
+                                        %s, 
+                                        %s, 
+                                        %s, 
+                                        %s, 
+                                        %s, 
+                                        %s, 
+                                        %s)"""
+        try:
+            cur = db.cursor()
+            cur.execute (ins_sql, file_det)
+            db.commit()
+            print('file loaded')
+        except Exception as e:
+            logging.INFO('Error in Insert transmissionlog, ' + str(e))
+    else:
+        try:
+    
+            db = MySql.connect(user='transmissionlog', password='tr4nsm1ss10n',
+                                              host='127.0.0.1',
+                                              database='marsextract')  
+        except Exception as e:
+            logging.INFO('Error Connecting DB., ' + str(e))
+        
+        ins_sql = """insert into marsextract.transmissionlog (filename,
+										filesizeinbytes, 
+                                        sourcepath,
+                                        canbetransmitted,
+                                        isdeleted,
+                                        datereceived,
+                                        farmerserverid,
+                                        canbedeleted,
+                                        projectid,
+ 									    lastcheck) 
+                                values (%s, 
+                                        %s, 
+                                        %s, 
+                                        %s, 
+                                        %s, 
+                                        %s, 
+                                        %s, 
+                                        %s, 
+                                        %s, 
+                                        %s)"""
+        try:
+            cur = db.cursor()
+            cur.execute (ins_sql, file_det)
+            db.commit()
+        except Exception as e:
+            logging.INFO('Error in Insert transmissionlog, ' + str(e))
+            pass
+   
+################################# Trigger email ###############################
 
-    record = projects.fetchall()
-    record_tuple = []
-    record_list = []
-    if record:   
-        for row in record:
-        ## Fetch rows from table and start upload the files...
-        ## get all required details from Database Table
-            projectID = row[0]
-            fileShare = row[1]
-            priorityID = row[2]
-            driveName = row[3]
-            farmerserverid = row[4]
-            record_tuple = (projectID,fileShare,priorityID,driveName,farmerserverid)
-            record_list.append(record_tuple) ##= tuple(record_list)   
-            #monitorForProject(projectID,fileShare,priorityID,driveName,farmerserverid)
 
+def send_email():
+    text1 = "Hi All,\n"
+    text2 = "Python WatchDog service has been stopped working. Please check the windows event log for more INFO."
+    text3 = "Thanks,"
+    text4 = "TSATransmissions Team"
+    text5 = """The INFOrmation contained in this message may be CONFIDENTIAL and is for the intended addressee only.  
+    Any unauthorized use, dissemination of the INFOrmation, or copying of this message is prohibited.  
+    
+    If you are not the intended addressee, please notify the sender immediately and delete this message."""
+
+    text6 = """***Please note that this is an automated response. Please do not reply to this email.***"""
+
+    sender = 'tsatransmissions@metlife.com'
+    receivers = ['arumugam.chinnadurai@metlife.com']
+    message = MIMEMultipart()
+    message['From'] = 'NoReply@TSATransmissions'
+    message['To'] = ", ".join(receivers)
+    message['X-MSMail-Priority'] = 'High'
+    message['Subject'] = "High - Python WatchDog service notification - Service has been stopped."
+    html = """\
+            <html>
+              <head></head>
+              <body>
+                {0}<br>
+                {1}<br><br>
+                {2}<br>
+                {3}<br>
+                {4}<br><br>
+                {5}
+              </body>
+            </html>
+            """.format(text1, text2, text3, text4, text5, text6)
+
+    part1 = MIMEText(html, 'html')
+    message.attach(part1)
     try:
-            pool = mp.Pool(mp.cpu_count())                          
-            updated = pool.starmap_async(monitorForProject, record_list)
-            #for rec in record_list:
-            #    monitorForProject(rec[0],rec[1],rec[2],rec[3],rec[4])
-            pool.close()
-            pool.join()  
-            cnx.close()
-            end_time = str(datetime.now().strftime('%Y-%m-%d:%H:%M:%S'))
-            print("File Intake ended at " + end_time)
+        smtpObj = smtplib.SMTP('commin.metlife.com', 25)
+        smtpObj.sendmail(sender, receivers, message.as_string())
+        print("Successfully sent an email")
     except Exception as e:
-            #print("main exception")
-            start_time = str(datetime.now().strftime('%m-%d-%Y %H:%M:%S'))
-            sender = 'TSATransmissions@metlife.com'
-            receivers = ['TSATransmissions@metlife.com']
-            msg = MIMEText('Failed to run TSAE_FFile_Check script code during multiprocessing. Error was ' + str(e))
-    
-            msg['Subject'] = 'P&C File Intake Monitoring Error -  ' + str(start_time) + '.'
-            msg['From'] = 'NoReply@TSATransmissions'
-            msg['To'] = 'TSATransmissions@metlife.com'    
-    
-            sendemail(sender, receivers, msg.as_string())
-    
+        logging.INFO("Error occured: unable to send an email " + str(e))
+        pass
+
+###############################################################################
+
+# def on_moved(event):
+#   print(f"moved {event.src_path} to {event.dest_path}")
+
+# my_event_handler.on_created = on_created
+##my_event_handler.on_deleted = on_deleted
+my_event_handler.on_modified = on_modified
+# my_event_handler.on_moved = on_moved
+
+source_path = ["G:\SWATTransmissions", "J:\SWATTransmissions"]
+go_recursively = True
+my_observer = Observer()
+for path in source_path:
+    my_observer.schedule(my_event_handler, path, recursive=go_recursively)
+my_observer.start()
+
+try:
+     while True:
+         last_trigger_time = time.time()
+         time.sleep(1)
+except KeyboardInterrupt as e:
+        send_email()
+        print('Python WatchDog service interrupted ' + str(e))
+        my_observer.stop()
+        my_observer.join()
+###############################################################################
